@@ -12,6 +12,7 @@ This script is smoke-test oriented:
 import os
 import random
 import sys
+import types
 from typing import Dict, List, Tuple
 
 os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
@@ -21,6 +22,44 @@ sys.path.insert(0, REPO_ROOT)
 
 SEED = 20260313
 DATASET_NAME = "kuairand-1k"
+
+
+def _install_hammer_stub_if_missing() -> None:
+    """Install a minimal hammer module stub for environments without hammer."""
+    try:
+        import hammer  # noqa: F401
+        return
+    except Exception:
+        pass
+
+    hammer_mod = types.ModuleType("hammer")
+    hammer_v2_mod = types.ModuleType("hammer.v2")
+    hammer_v2_ops_mod = types.ModuleType("hammer.v2.ops")
+    hammer_v2_ops_triton_mod = types.ModuleType("hammer.v2.ops.triton")
+    hammer_v2_ops_triton_template_mod = types.ModuleType(
+        "hammer.v2.ops.triton.template"
+    )
+    hammer_v2_tlx_mod = types.ModuleType(
+        "hammer.v2.ops.triton.template.tlx_bw_hstu_attention"
+    )
+
+    def _not_available(*args, **kwargs):
+        raise RuntimeError(
+            "hammer is not installed; TLX hammer kernels are unavailable in this environment."
+        )
+
+    hammer_v2_tlx_mod.tlx_bw_hstu_mha_wrapper = _not_available
+
+    sys.modules.setdefault("hammer", hammer_mod)
+    sys.modules.setdefault("hammer.v2", hammer_v2_mod)
+    sys.modules.setdefault("hammer.v2.ops", hammer_v2_ops_mod)
+    sys.modules.setdefault("hammer.v2.ops.triton", hammer_v2_ops_triton_mod)
+    sys.modules.setdefault(
+        "hammer.v2.ops.triton.template", hammer_v2_ops_triton_template_mod
+    )
+    sys.modules.setdefault(
+        "hammer.v2.ops.triton.template.tlx_bw_hstu_attention", hammer_v2_tlx_mod
+    )
 
 
 def _set_seed(seed: int) -> None:
@@ -344,6 +383,7 @@ def main() -> int:
         print(f"Import error: {exc}")
         return 2
 
+    _install_hammer_stub_if_missing()
     _set_seed(SEED)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
