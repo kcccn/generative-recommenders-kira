@@ -383,6 +383,75 @@ def _install_sparse_move_hook() -> None:
     )
 
 
+def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
+    if not _is_debug_enabled():
+        return
+
+    dense_model = getattr(model_family.dense, "model", None)
+    if dense_model is None:
+        logger.warning(
+            "KIRA_IO dense hooks skipped: dense.model is None "
+            "(likely distributed dense workers)"
+        )
+        return
+
+    original_item_forward = dense_model._item_forward  # pyre-ignore[16]
+    original_user_forward = dense_model._user_forward  # pyre-ignore[16]
+    if getattr(original_item_forward, "_kira_dense_debug_wrapped", False):
+        return
+
+    pending: Dict[str, Any] = {}
+
+    def wrapped_item_forward(*args: Any, **kwargs: Any):
+        seq_embeddings = kwargs.get("seq_embeddings")
+        if seq_embeddings is None and args:
+            seq_embeddings = args[0]
+
+        if isinstance(seq_embeddings, dict):
+            _emit_debug_event(
+                event="kira_smoke.dense_concat_seq_embeddings",
+                payload={
+                    "seq_embeddings": {
+                        k: {
+                            "lengths": _tensor_summary(v.lengths),
+                            "embedding": _tensor_summary(
+                                v.embedding,
+                                include_l2=True,
+                            ),
+                        }
+                        for k, v in seq_embeddings.items()
+                    }
+                },
+            )
+
+        item_embeddings = original_item_forward(*args, **kwargs)
+        pending["item_embedding"] = _tensor_summary(
+            item_embeddings,
+            include_l2=True,
+        )
+        return item_embeddings
+
+    def wrapped_user_forward(*args: Any, **kwargs: Any):
+        user_embeddings = original_user_forward(*args, **kwargs)
+        _emit_debug_event(
+            event="kira_smoke.dense_forward_embeddings",
+            payload={
+                "candidates_item_embedding": pending.get("item_embedding"),
+                "candidates_user_embedding": _tensor_summary(
+                    user_embeddings,
+                    include_l2=True,
+                ),
+            },
+        )
+        pending.clear()
+        return user_embeddings
+
+    wrapped_item_forward._kira_dense_debug_wrapped = True  # type: ignore[attr-defined]
+    wrapped_user_forward._kira_dense_debug_wrapped = True  # type: ignore[attr-defined]
+    dense_model._item_forward = wrapped_item_forward  # pyre-ignore[16]
+    dense_model._user_forward = wrapped_user_forward  # pyre-ignore[16]
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Native smoke demo for DLRMv3 movielens-1m inference",
@@ -762,6 +831,7 @@ def main() -> None:
         model_family=model_family,
     )
     _install_preprocess_hook(model_family)
+    _install_dense_hooks(model_family)
 
     try:
         pred_output = model_family.predict(samples)
