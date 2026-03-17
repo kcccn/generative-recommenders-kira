@@ -14,7 +14,7 @@ generative-recommenders inference APIs only.
 import argparse
 import os
 import random
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -50,6 +50,15 @@ def _parse_args() -> argparse.Namespace:
         default=123,
         help="Random seed for reproducibility (default: 123).",
     )
+    parser.add_argument(
+        "--max-num-embeddings",
+        type=int,
+        default=None,
+        help=(
+            "Optional upper bound for each embedding table's num_embeddings. "
+            "Use this to match truncated checkpoints and avoid shape mismatch."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -71,6 +80,25 @@ def _set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _truncate_table_config_num_embeddings(
+    table_config: Dict[str, Any],
+    max_num_embeddings: Optional[int],
+) -> None:
+    if max_num_embeddings is None:
+        return
+    if max_num_embeddings <= 0:
+        raise ValueError(
+            f"--max-num-embeddings must be > 0, got {max_num_embeddings}"
+        )
+
+    print(f"Applying num_embeddings cap: {max_num_embeddings}")
+    for table_name, emb_cfg in table_config.items():
+        old_rows = int(emb_cfg.num_embeddings)
+        new_rows = min(old_rows, max_num_embeddings)
+        emb_cfg.num_embeddings = new_rows
+        print(f"  table={table_name}: {old_rows} -> {new_rows}")
 
 
 def _build_hardcoded_prompt() -> Tuple[List[Dict[str, int]], List[Dict[str, int]], Dict[str, int]]:
@@ -219,6 +247,10 @@ def main() -> None:
     hstu_config = get_hstu_configs("movielens-1m")
     hstu_config.max_num_candidates = hstu_config.max_num_candidates_inference
     table_config = get_embedding_table_config("movielens-1m")
+    _truncate_table_config_num_embeddings(
+        table_config=table_config,
+        max_num_embeddings=args.max_num_embeddings,
+    )
 
     model_family = HSTUModelFamily(
         hstu_config=hstu_config,
@@ -242,6 +274,7 @@ def main() -> None:
     print(f"Model path: {args.model_path}")
     print(f"WORLD_SIZE: {os.environ.get('WORLD_SIZE')}")
     print(f"Seed: {args.seed}")
+    print(f"max_num_embeddings: {args.max_num_embeddings}")
     print(f"History len: {len(user_history)}")
     print(f"Candidates: {len(candidate_rows)}")
 
