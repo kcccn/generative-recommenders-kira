@@ -448,7 +448,36 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
                 },
             )
 
-        item_embeddings = original_item_forward(*args, **kwargs)
+        layer_outputs: Dict[str, Dict[str, Any]] = {}
+        hooks = []
+        item_mlp = dense_model._item_embedding_mlp  # pyre-ignore[16]
+
+        def _make_hook(layer_name: str):
+            def _hook(_module: torch.nn.Module, _inputs: Tuple[Any, ...], output: Any):
+                if isinstance(output, torch.Tensor):
+                    layer_outputs[layer_name] = _tensor_summary(
+                        output,
+                        include_l2=True,
+                    )
+            return _hook
+
+        for idx, layer in enumerate(item_mlp):
+            layer_name = f"{idx}_{layer.__class__.__name__}"
+            hooks.append(layer.register_forward_hook(_make_hook(layer_name)))
+
+        try:
+            item_embeddings = original_item_forward(*args, **kwargs)
+        finally:
+            for hook in hooks:
+                hook.remove()
+
+        _emit_debug_event(
+            event="kira_smoke.item_forward_mlp_layer_outputs",
+            payload={
+                "layers": layer_outputs,
+            },
+        )
+
         _emit_debug_event(
             event="kira_smoke.item_forward_output",
             payload={
