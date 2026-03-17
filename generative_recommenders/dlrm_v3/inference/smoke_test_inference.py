@@ -12,6 +12,7 @@ generative-recommenders inference APIs only.
 """
 
 import argparse
+import json
 import os
 import random
 from typing import Any, Dict, List, Optional, Tuple
@@ -51,6 +52,15 @@ def _parse_args() -> argparse.Namespace:
         help="Random seed for reproducibility (default: 123).",
     )
     parser.add_argument(
+        "--config-json",
+        type=str,
+        default=None,
+        help=(
+            "Optional config.json path with embedding_tables[*].num_embeddings. "
+            "If omitted, the script tries <model-path>/config.json."
+        ),
+    )
+    parser.add_argument(
         "--max-num-embeddings",
         type=int,
         default=None,
@@ -80,6 +90,48 @@ def _set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _resolve_config_json_path(
+    model_path: str,
+    config_json_arg: Optional[str],
+) -> Optional[str]:
+    if config_json_arg:
+        return config_json_arg
+
+    inferred = os.path.join(model_path, "config.json")
+    if os.path.isfile(inferred):
+        return inferred
+    return None
+
+
+def _apply_num_embeddings_from_config(
+    table_config: Dict[str, Any],
+    config_json_path: str,
+) -> None:
+    with open(config_json_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    embedding_tables = cfg.get("embedding_tables")
+    if not isinstance(embedding_tables, list):
+        print(
+            f"config.json has no embedding_tables list, skip sync: {config_json_path}"
+        )
+        return
+
+    print(f"Syncing num_embeddings from config: {config_json_path}")
+    cfg_rows_by_name: Dict[str, int] = {}
+    for table in embedding_tables:
+        if isinstance(table, dict) and "name" in table and "num_embeddings" in table:
+            cfg_rows_by_name[str(table["name"])] = int(table["num_embeddings"])
+
+    for table_name, emb_cfg in table_config.items():
+        if table_name not in cfg_rows_by_name:
+            continue
+        old_rows = int(emb_cfg.num_embeddings)
+        new_rows = int(cfg_rows_by_name[table_name])
+        emb_cfg.num_embeddings = new_rows
+        print(f"  table={table_name}: {old_rows} -> {new_rows} (from config)")
 
 
 def _truncate_table_config_num_embeddings(
@@ -247,6 +299,17 @@ def main() -> None:
     hstu_config = get_hstu_configs("movielens-1m")
     hstu_config.max_num_candidates = hstu_config.max_num_candidates_inference
     table_config = get_embedding_table_config("movielens-1m")
+
+    config_json_path = _resolve_config_json_path(
+        model_path=args.model_path,
+        config_json_arg=args.config_json,
+    )
+    if config_json_path is not None:
+        _apply_num_embeddings_from_config(
+            table_config=table_config,
+            config_json_path=config_json_path,
+        )
+
     _truncate_table_config_num_embeddings(
         table_config=table_config,
         max_num_embeddings=args.max_num_embeddings,
@@ -272,6 +335,7 @@ def main() -> None:
     print(" Native DLRMv3 Smoke Inference (movielens-1m)")
     print("=" * 70)
     print(f"Model path: {args.model_path}")
+    print(f"Config json: {config_json_path}")
     print(f"WORLD_SIZE: {os.environ.get('WORLD_SIZE')}")
     print(f"Seed: {args.seed}")
     print(f"max_num_embeddings: {args.max_num_embeddings}")
