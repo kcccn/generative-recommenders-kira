@@ -28,6 +28,7 @@ from generative_recommenders.modules.dlrm_hstu import (
     DlrmHSTUConfig,
     SequenceEmbedding,
 )
+from generative_recommenders.common import HammerKernel
 from torchrec.modules.embedding_modules import (
     EmbeddingBagCollection,
     EmbeddingCollection,
@@ -82,6 +83,7 @@ def get_hstu_model(
         is_dense=is_dense,
     )
     model.eval()
+    model.set_hammer_kernel(HammerKernel.PYTORCH)
     model.recursive_setattr("_use_triton_cc", False)
     for _, module in model.named_modules():
         if isinstance(module, EmbeddingBagCollection) or isinstance(
