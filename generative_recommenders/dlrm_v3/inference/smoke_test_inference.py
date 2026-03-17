@@ -344,6 +344,10 @@ def _install_sparse_move_hook() -> None:
                 abs_diff = (src_fp32 - dst_fp32).abs()
                 move_info["cast_max_abs_diff"] = float(abs_diff.max().item())
                 move_info["cast_mean_abs_diff"] = float(abs_diff.mean().item())
+            move_info["embedding_after_cast"] = _tensor_summary(
+                dst_embedding,
+                include_l2=True,
+            )
             seq_move[key] = move_info
 
         payload_move = {
