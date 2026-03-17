@@ -349,7 +349,8 @@ def main() -> None:
             raise RuntimeError("predict returned None unexpectedly")
         mt_target_preds, _, _, dt_sparse, dt_dense = pred_output
     finally:
-        model_family.predict(None)
+        if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+            model_family.predict(None)
 
     scores = mt_target_preds.view(-1).detach().cpu().float().tolist()
     item_ids = [int(row["item_movie_id"]) for row in candidate_rows]
