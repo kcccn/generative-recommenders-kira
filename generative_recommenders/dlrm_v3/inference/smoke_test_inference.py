@@ -396,11 +396,23 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
         return
 
     original_item_forward = dense_model._item_forward  # pyre-ignore[16]
-    original_user_forward = dense_model._user_forward  # pyre-ignore[16]
     if getattr(original_item_forward, "_kira_dense_debug_wrapped", False):
         return
 
-    pending: Dict[str, Any] = {}
+    item_feature_names = list(dense_model._hstu_configs.item_embedding_feature_names)  # pyre-ignore[16]
+    item_mlp_params = {
+        name: p.detach()
+        for name, p in dense_model._item_embedding_mlp.named_parameters()  # pyre-ignore[16]
+    }
+    _emit_debug_event(
+        event="kira_smoke.item_forward_mlp_weights_once",
+        payload={
+            "item_embedding_mlp": {
+                name: _tensor_summary(param)
+                for name, param in item_mlp_params.items()
+            }
+        },
+    )
 
     def wrapped_item_forward(*args: Any, **kwargs: Any):
         seq_embeddings = kwargs.get("seq_embeddings")
@@ -409,47 +421,47 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
 
         if isinstance(seq_embeddings, dict):
             _emit_debug_event(
-                event="kira_smoke.dense_concat_seq_embeddings",
+                event="kira_smoke.item_forward_input_features",
                 payload={
-                    "seq_embeddings": {
-                        k: {
-                            "lengths": _tensor_summary(v.lengths),
-                            "embedding": _tensor_summary(
-                                v.embedding,
-                                include_l2=True,
-                            ),
-                        }
-                        for k, v in seq_embeddings.items()
-                    }
+                    "item_embedding_feature_names": item_feature_names,
+                    "item_feature_embeddings": {
+                        name: _tensor_summary(
+                            seq_embeddings[name].embedding,
+                            include_l2=True,
+                        )
+                        for name in item_feature_names
+                    },
+                },
+            )
+
+            all_embeddings = torch.cat(
+                [seq_embeddings[name].embedding for name in item_feature_names],
+                dim=-1,
+            )
+            _emit_debug_event(
+                event="kira_smoke.item_forward_concat_output",
+                payload={
+                    "all_embeddings": _tensor_summary(
+                        all_embeddings,
+                        include_l2=True,
+                    ),
                 },
             )
 
         item_embeddings = original_item_forward(*args, **kwargs)
-        pending["item_embedding"] = _tensor_summary(
-            item_embeddings,
-            include_l2=True,
-        )
-        return item_embeddings
-
-    def wrapped_user_forward(*args: Any, **kwargs: Any):
-        user_embeddings = original_user_forward(*args, **kwargs)
         _emit_debug_event(
-            event="kira_smoke.dense_forward_embeddings",
+            event="kira_smoke.item_forward_output",
             payload={
-                "candidates_item_embedding": pending.get("item_embedding"),
-                "candidates_user_embedding": _tensor_summary(
-                    user_embeddings,
+                "candidates_item_embeddings": _tensor_summary(
+                    item_embeddings,
                     include_l2=True,
                 ),
             },
         )
-        pending.clear()
-        return user_embeddings
+        return item_embeddings
 
     wrapped_item_forward._kira_dense_debug_wrapped = True  # type: ignore[attr-defined]
-    wrapped_user_forward._kira_dense_debug_wrapped = True  # type: ignore[attr-defined]
     dense_model._item_forward = wrapped_item_forward  # pyre-ignore[16]
-    dense_model._user_forward = wrapped_user_forward  # pyre-ignore[16]
 
 
 def _parse_args() -> argparse.Namespace:
