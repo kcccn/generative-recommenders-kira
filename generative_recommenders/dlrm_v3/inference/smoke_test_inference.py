@@ -498,6 +498,19 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
             }
         },
     )
+    user_transducer_params = {
+        name: p.detach()
+        for name, p in dense_model._hstu_transducer.named_parameters()  # pyre-ignore[16]
+    }
+    _emit_debug_event(
+        event="kira_smoke.user_forward_weights_once",
+        payload={
+            "hstu_transducer": {
+                name: _tensor_summary(param)
+                for name, param in user_transducer_params.items()
+            }
+        },
+    )
 
     def wrapped_item_forward(*args: Any, **kwargs: Any):
         seq_embeddings = kwargs.get("seq_embeddings")
