@@ -398,6 +398,130 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
 
     hstu_transducer = getattr(dense_model, "_hstu_transducer", None)  # pyre-ignore[16]
     if hstu_transducer is not None:
+        input_preprocessor = getattr(hstu_transducer, "_input_preprocessor", None)
+        if input_preprocessor is not None:
+            original_input_preprocessor_forward = input_preprocessor.forward
+            if not getattr(
+                original_input_preprocessor_forward,
+                "_kira_user_debug_wrapped",
+                False,
+            ):
+                def wrapped_input_preprocessor_forward(*args: Any, **kwargs: Any):
+                    out = original_input_preprocessor_forward(*args, **kwargs)
+                    (
+                        out_max_seq_len,
+                        out_total_uih_len,
+                        out_total_targets,
+                        out_seq_lengths,
+                        out_seq_offsets,
+                        out_seq_timestamps,
+                        out_seq_embeddings,
+                        out_num_targets,
+                        out_seq_payloads,
+                    ) = out
+                    _emit_debug_event(
+                        event="kira_smoke.user_transducer_after_input_preprocessor",
+                        payload={
+                            "max_seq_len": int(out_max_seq_len),
+                            "total_uih_len": int(out_total_uih_len),
+                            "total_targets": int(out_total_targets),
+                            "seq_lengths": _tensor_summary(out_seq_lengths),
+                            "seq_offsets": _tensor_summary(out_seq_offsets),
+                            "seq_timestamps": _tensor_summary(out_seq_timestamps),
+                            "seq_embeddings": _tensor_summary(
+                                out_seq_embeddings,
+                                include_l2=True,
+                            ),
+                            "num_targets": _tensor_summary(out_num_targets),
+                            "seq_payloads": {
+                                k: _tensor_summary(v)
+                                for k, v in out_seq_payloads.items()
+                            },
+                        },
+                    )
+                    return out
+
+                wrapped_input_preprocessor_forward._kira_user_debug_wrapped = True  # type: ignore[attr-defined]
+                input_preprocessor.forward = wrapped_input_preprocessor_forward
+
+        positional_encoder = getattr(hstu_transducer, "_positional_encoder", None)
+        if positional_encoder is not None:
+            original_positional_encoder_forward = positional_encoder.forward
+            if not getattr(
+                original_positional_encoder_forward,
+                "_kira_user_debug_wrapped",
+                False,
+            ):
+                def wrapped_positional_encoder_forward(*args: Any, **kwargs: Any):
+                    seq_lengths = kwargs.get(
+                        "seq_lengths",
+                        args[1] if len(args) > 1 else None,
+                    )
+                    seq_offsets = kwargs.get(
+                        "seq_offsets",
+                        args[2] if len(args) > 2 else None,
+                    )
+                    seq_timestamps = kwargs.get(
+                        "seq_timestamps",
+                        args[3] if len(args) > 3 else None,
+                    )
+                    seq_embeddings_in = kwargs.get(
+                        "seq_embeddings",
+                        args[4] if len(args) > 4 else None,
+                    )
+                    num_targets = kwargs.get(
+                        "num_targets",
+                        args[5] if len(args) > 5 else None,
+                    )
+                    max_seq_len = kwargs.get(
+                        "max_seq_len",
+                        args[0] if len(args) > 0 else None,
+                    )
+                    out = original_positional_encoder_forward(*args, **kwargs)
+                    _emit_debug_event(
+                        event="kira_smoke.user_transducer_after_positional_encoder",
+                        payload={
+                            "max_seq_len": (
+                                int(max_seq_len)
+                                if isinstance(max_seq_len, int)
+                                else None
+                            ),
+                            "seq_lengths": (
+                                _tensor_summary(seq_lengths)
+                                if isinstance(seq_lengths, torch.Tensor)
+                                else None
+                            ),
+                            "seq_offsets": (
+                                _tensor_summary(seq_offsets)
+                                if isinstance(seq_offsets, torch.Tensor)
+                                else None
+                            ),
+                            "seq_timestamps": (
+                                _tensor_summary(seq_timestamps)
+                                if isinstance(seq_timestamps, torch.Tensor)
+                                else None
+                            ),
+                            "seq_embeddings_input": (
+                                _tensor_summary(seq_embeddings_in, include_l2=True)
+                                if isinstance(seq_embeddings_in, torch.Tensor)
+                                else None
+                            ),
+                            "seq_embeddings_output": _tensor_summary(
+                                out,
+                                include_l2=True,
+                            ),
+                            "num_targets": (
+                                _tensor_summary(num_targets)
+                                if isinstance(num_targets, torch.Tensor)
+                                else None
+                            ),
+                        },
+                    )
+                    return out
+
+                wrapped_positional_encoder_forward._kira_user_debug_wrapped = True  # type: ignore[attr-defined]
+                positional_encoder.forward = wrapped_positional_encoder_forward
+
         original_transducer_preprocess = hstu_transducer._preprocess
         if not getattr(original_transducer_preprocess, "_kira_user_debug_wrapped", False):
             def wrapped_transducer_preprocess(*args: Any, **kwargs: Any):
