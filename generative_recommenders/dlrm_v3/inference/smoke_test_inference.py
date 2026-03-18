@@ -571,21 +571,105 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
                         and isinstance(seq_embeddings_in, torch.Tensor)
                         and int(getattr(input_preprocessor, "_max_contextual_seq_len", 0)) > 0
                     ):
-                        contextual_input_embeddings = (
-                            kira_preprocessors_module.get_contextual_input_embeddings(
-                                seq_lengths=seq_lengths,
-                                seq_payloads=seq_payloads,
-                                contextual_feature_to_max_length=getattr(
-                                    input_preprocessor,
-                                    "_contextual_feature_to_max_length",
-                                ),
-                                contextual_feature_to_min_uih_length=getattr(
-                                    input_preprocessor,
-                                    "_contextual_feature_to_min_uih_length",
-                                ),
-                                dtype=seq_embeddings_in.dtype,
-                            )
+                        contextual_feature_to_max_length = getattr(
+                            input_preprocessor,
+                            "_contextual_feature_to_max_length",
                         )
+                        contextual_feature_to_min_uih_length = getattr(
+                            input_preprocessor,
+                            "_contextual_feature_to_min_uih_length",
+                        )
+                        contextual_feature_order = list(
+                            contextual_feature_to_max_length.keys()
+                        )
+                        contextual_inputs_by_feature: Dict[str, Dict[str, Any]] = {}
+                        contextual_padded_values: List[torch.Tensor] = []
+                        for key, max_len in contextual_feature_to_max_length.items():
+                            padded = torch.flatten(
+                                kira_preprocessors_module.jagged_to_padded_dense(
+                                    values=seq_payloads[key].to(seq_embeddings_in.dtype),
+                                    offsets=[seq_payloads[key + "_offsets"]],
+                                    max_lengths=[max_len],
+                                    padding_value=0.0,
+                                ),
+                                1,
+                                2,
+                            )
+                            min_uih_length = contextual_feature_to_min_uih_length.get(
+                                key, 0
+                            )
+                            if min_uih_length > 0:
+                                padded = padded * (
+                                    seq_lengths.view(-1, 1) >= min_uih_length
+                                )
+                            contextual_padded_values.append(padded)
+                            contextual_inputs_by_feature[key] = {
+                                "max_len": int(max_len),
+                                "min_uih_length": int(min_uih_length),
+                                "raw_values": _tensor_summary(
+                                    seq_payloads[key],
+                                    include_l2=True,
+                                ),
+                                "offsets": _tensor_summary(seq_payloads[key + "_offsets"]),
+                                "padded_values": _tensor_summary(
+                                    padded,
+                                    include_l2=True,
+                                ),
+                            }
+                        contextual_input_embeddings = torch.cat(
+                            contextual_padded_values,
+                            dim=1,
+                        )
+                        _emit_debug_event(
+                            event="kira_smoke.input_preprocessor_stage_contextual_input_components",
+                            payload={
+                                "contextual_feature_order": contextual_feature_order,
+                                "contextual_inputs_by_feature": contextual_inputs_by_feature,
+                                "contextual_input_embeddings": _tensor_summary(
+                                    contextual_input_embeddings,
+                                    include_l2=True,
+                                ),
+                            },
+                        )
+                        if not getattr(
+                            input_preprocessor,
+                            "_kira_contextual_weights_logged",
+                            False,
+                        ):
+                            slot_feature_names: List[str] = []
+                            for key, max_len in contextual_feature_to_max_length.items():
+                                for idx in range(max_len):
+                                    slot_feature_names.append(f"{key}[{idx}]")
+                            _emit_debug_event(
+                                event="kira_smoke.input_preprocessor_stage_contextual_weights_once",
+                                payload={
+                                    "contextual_feature_order": contextual_feature_order,
+                                    "slot_feature_names": slot_feature_names,
+                                    "batched_contextual_linear_weights": _tensor_summary(
+                                        input_preprocessor._batched_contextual_linear_weights,  # pyre-ignore[16]
+                                        include_l2=True,
+                                    ),
+                                    "batched_contextual_linear_bias": _tensor_summary(
+                                        input_preprocessor._batched_contextual_linear_bias,  # pyre-ignore[16]
+                                        include_l2=True,
+                                    ),
+                                    "slot_weights": {
+                                        slot_feature_names[i]: _tensor_summary(
+                                            input_preprocessor._batched_contextual_linear_weights[i],  # pyre-ignore[16]
+                                            include_l2=True,
+                                        )
+                                        for i in range(len(slot_feature_names))
+                                    },
+                                    "slot_bias": {
+                                        slot_feature_names[i]: _tensor_summary(
+                                            input_preprocessor._batched_contextual_linear_bias[i],  # pyre-ignore[16]
+                                            include_l2=True,
+                                        )
+                                        for i in range(len(slot_feature_names))
+                                    },
+                                },
+                            )
+                            input_preprocessor._kira_contextual_weights_logged = True  # pyre-ignore[16]
                         contextual_embeddings = torch.baddbmm(
                             input_preprocessor._batched_contextual_linear_bias.view(  # pyre-ignore[16]
                                 -1,
