@@ -31,6 +31,7 @@ from generative_recommenders.dlrm_v3.configs import (
 from generative_recommenders.dlrm_v3.datasets.dataset import Samples
 from generative_recommenders.dlrm_v3.inference.inference_modules import set_is_inference
 from generative_recommenders.dlrm_v3.inference.model_family import HSTUModelFamily
+from generative_recommenders.ops.jagged_tensors import concat_2D_jagged
 
 logging.basicConfig(
     level=logging.INFO,
@@ -395,6 +396,90 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
         )
         return
 
+    hstu_transducer = getattr(dense_model, "_hstu_transducer", None)  # pyre-ignore[16]
+    if hstu_transducer is not None:
+        original_transducer_preprocess = hstu_transducer._preprocess
+        if not getattr(original_transducer_preprocess, "_kira_user_debug_wrapped", False):
+            def wrapped_transducer_preprocess(*args: Any, **kwargs: Any):
+                out = original_transducer_preprocess(*args, **kwargs)
+                (
+                    out_max_seq_len,
+                    out_total_uih_len,
+                    out_total_targets,
+                    out_seq_lengths,
+                    out_seq_offsets,
+                    out_seq_timestamps,
+                    out_seq_embeddings,
+                    out_num_targets,
+                    out_seq_payloads,
+                ) = out
+                _emit_debug_event(
+                    event="kira_smoke.user_transducer_preprocess_output",
+                    payload={
+                        "max_seq_len": int(out_max_seq_len),
+                        "total_uih_len": int(out_total_uih_len),
+                        "total_targets": int(out_total_targets),
+                        "seq_lengths": _tensor_summary(out_seq_lengths),
+                        "seq_offsets": _tensor_summary(out_seq_offsets),
+                        "seq_timestamps": _tensor_summary(out_seq_timestamps),
+                        "seq_embeddings": _tensor_summary(
+                            out_seq_embeddings,
+                            include_l2=True,
+                        ),
+                        "num_targets": _tensor_summary(out_num_targets),
+                        "seq_payloads": {
+                            k: _tensor_summary(v)
+                            for k, v in out_seq_payloads.items()
+                        },
+                    },
+                )
+                return out
+
+            wrapped_transducer_preprocess._kira_user_debug_wrapped = True  # type: ignore[attr-defined]
+            hstu_transducer._preprocess = wrapped_transducer_preprocess
+
+        original_transducer_hstu_compute = hstu_transducer._hstu_compute
+        if not getattr(original_transducer_hstu_compute, "_kira_user_debug_wrapped", False):
+            def wrapped_transducer_hstu_compute(*args: Any, **kwargs: Any):
+                out = original_transducer_hstu_compute(*args, **kwargs)
+                _emit_debug_event(
+                    event="kira_smoke.user_transducer_hstu_output",
+                    payload={
+                        "encoded_seq_embeddings": _tensor_summary(
+                            out,
+                            include_l2=True,
+                        ),
+                    },
+                )
+                return out
+
+            wrapped_transducer_hstu_compute._kira_user_debug_wrapped = True  # type: ignore[attr-defined]
+            hstu_transducer._hstu_compute = wrapped_transducer_hstu_compute
+
+        original_transducer_postprocess = hstu_transducer._postprocess
+        if not getattr(original_transducer_postprocess, "_kira_user_debug_wrapped", False):
+            def wrapped_transducer_postprocess(*args: Any, **kwargs: Any):
+                out = original_transducer_postprocess(*args, **kwargs)
+                full_embeddings, candidate_embeddings = out
+                _emit_debug_event(
+                    event="kira_smoke.user_transducer_postprocess_output",
+                    payload={
+                        "candidate_embeddings": _tensor_summary(
+                            candidate_embeddings,
+                            include_l2=True,
+                        ),
+                        "full_seq_embeddings": (
+                            _tensor_summary(full_embeddings, include_l2=True)
+                            if isinstance(full_embeddings, torch.Tensor)
+                            else None
+                        ),
+                    },
+                )
+                return out
+
+            wrapped_transducer_postprocess._kira_user_debug_wrapped = True  # type: ignore[attr-defined]
+            hstu_transducer._postprocess = wrapped_transducer_postprocess
+
     original_item_forward = dense_model._item_forward  # pyre-ignore[16]
     if getattr(original_item_forward, "_kira_dense_debug_wrapped", False):
         return
@@ -495,6 +580,55 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
     original_user_forward = dense_model._user_forward  # pyre-ignore[16]
 
     def wrapped_user_forward(*args: Any, **kwargs: Any):
+        max_uih_len = kwargs.get("max_uih_len", args[0] if len(args) > 0 else None)
+        max_candidates = kwargs.get("max_candidates", args[1] if len(args) > 1 else None)
+        seq_embeddings = kwargs.get("seq_embeddings", args[2] if len(args) > 2 else None)
+        payload_features = kwargs.get("payload_features", args[3] if len(args) > 3 else None)
+        num_candidates = kwargs.get("num_candidates", args[4] if len(args) > 4 else None)
+
+        if (
+            isinstance(seq_embeddings, dict)
+            and isinstance(payload_features, dict)
+            and isinstance(num_candidates, torch.Tensor)
+            and max_uih_len is not None
+            and max_candidates is not None
+        ):
+            post_id_feature = dense_model._hstu_configs.uih_post_id_feature_name  # pyre-ignore[16]
+            action_time_feature = dense_model._hstu_configs.uih_action_time_feature_name  # pyre-ignore[16]
+            query_time_feature = dense_model._hstu_configs.candidates_querytime_feature_name  # pyre-ignore[16]
+
+            source_lengths = seq_embeddings[post_id_feature].lengths
+            source_timestamps = concat_2D_jagged(
+                max_seq_len=int(max_uih_len) + int(max_candidates),
+                max_len_left=int(max_uih_len),
+                offsets_left=payload_features["uih_offsets"],
+                values_left=payload_features[action_time_feature].unsqueeze(-1),
+                max_len_right=int(max_candidates),
+                offsets_right=payload_features["candidate_offsets"],
+                values_right=payload_features[query_time_feature].unsqueeze(-1),
+                kernel=dense_model.hammer_kernel(),  # pyre-ignore[16]
+            ).squeeze(-1)
+            embedding = seq_embeddings[post_id_feature].embedding
+            seq_payload = dense_model._construct_payload(  # pyre-ignore[16]
+                payload_features=payload_features,
+                seq_embeddings=seq_embeddings,
+            )
+
+            _emit_debug_event(
+                event="kira_smoke.user_forward_input_features",
+                payload={
+                    "source_lengths": _tensor_summary(source_lengths),
+                    "source_timestamps": _tensor_summary(source_timestamps),
+                    "embedding": _tensor_summary(embedding, include_l2=True),
+                    "num_candidates": _tensor_summary(num_candidates),
+                    "total_targets": int(num_candidates.sum().item()),
+                    "seq_payloads": {
+                        k: _tensor_summary(v)
+                        for k, v in seq_payload.items()
+                    },
+                },
+            )
+
         user_embeddings = original_user_forward(*args, **kwargs)
         _emit_debug_event(
             event="kira_smoke.user_forward_output",
