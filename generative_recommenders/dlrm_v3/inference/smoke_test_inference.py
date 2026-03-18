@@ -24,6 +24,7 @@ import torch
 from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
 import generative_recommenders.dlrm_v3.inference.model_family as kira_model_family_module
+import generative_recommenders.modules.preprocessors as kira_preprocessors_module
 from generative_recommenders.dlrm_v3.configs import (
     get_embedding_table_config,
     get_hstu_configs,
@@ -407,7 +408,65 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
                 False,
             ):
                 def wrapped_input_preprocessor_forward(*args: Any, **kwargs: Any):
+                    seq_lengths = kwargs.get(
+                        "seq_lengths",
+                        args[4] if len(args) > 4 else None,
+                    )
+                    seq_timestamps = kwargs.get(
+                        "seq_timestamps",
+                        args[5] if len(args) > 5 else None,
+                    )
+                    seq_embeddings_in = kwargs.get(
+                        "seq_embeddings",
+                        args[6] if len(args) > 6 else None,
+                    )
+                    num_targets = kwargs.get(
+                        "num_targets",
+                        args[7] if len(args) > 7 else None,
+                    )
+                    seq_payloads = kwargs.get(
+                        "seq_payloads",
+                        args[8] if len(args) > 8 else None,
+                    )
+
+                    stage_tensors: Dict[str, torch.Tensor] = {}
+                    hooks = []
+
+                    def _capture(name: str):
+                        def _hook(
+                            _module: torch.nn.Module,
+                            _inputs: Tuple[Any, ...],
+                            output: Any,
+                        ) -> None:
+                            if isinstance(output, torch.Tensor):
+                                stage_tensors[name] = output
+                        return _hook
+
+                    hooks.append(
+                        input_preprocessor._content_embedding_mlp.register_forward_hook(  # pyre-ignore[16]
+                            _capture("content_mlp_output")
+                        )
+                    )
+                    hooks.append(
+                        input_preprocessor._additional_embedding_mlp.register_forward_hook(  # pyre-ignore[16]
+                            _capture("additional_mlp_output")
+                        )
+                    )
+                    if getattr(input_preprocessor, "_action_weights", None) is not None:
+                        hooks.append(
+                            input_preprocessor._action_encoder.register_forward_hook(  # pyre-ignore[16]
+                                _capture("action_embeddings")
+                            )
+                        )
+                        hooks.append(
+                            input_preprocessor._action_embedding_mlp.register_forward_hook(  # pyre-ignore[16]
+                                _capture("action_mlp_output")
+                            )
+                        )
+
                     out = original_input_preprocessor_forward(*args, **kwargs)
+                    for hook in hooks:
+                        hook.remove()
                     (
                         out_max_seq_len,
                         out_total_uih_len,
@@ -419,6 +478,155 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
                         out_num_targets,
                         out_seq_payloads,
                     ) = out
+
+                    if (
+                        isinstance(seq_embeddings_in, torch.Tensor)
+                        and "content_mlp_output" in stage_tensors
+                    ):
+                        _emit_debug_event(
+                            event="kira_smoke.input_preprocessor_stage_content_mlp_output",
+                            payload={
+                                "seq_embeddings_input": _tensor_summary(
+                                    seq_embeddings_in,
+                                    include_l2=True,
+                                ),
+                                "content_mlp_output": _tensor_summary(
+                                    stage_tensors["content_mlp_output"],
+                                    include_l2=True,
+                                ),
+                            },
+                        )
+
+                    if isinstance(seq_payloads, dict):
+                        additional_features = list(
+                            getattr(input_preprocessor, "_additional_embedding_features", [])
+                        )
+                        if additional_features and "additional_mlp_output" in stage_tensors:
+                            additional_embeddings = torch.cat(
+                                [seq_payloads[feature] for feature in additional_features],
+                                dim=1,
+                            )
+                            seq_after_additional = (
+                                stage_tensors["content_mlp_output"]
+                                + stage_tensors["additional_mlp_output"]
+                                if "content_mlp_output" in stage_tensors
+                                else stage_tensors["additional_mlp_output"]
+                            )
+                            _emit_debug_event(
+                                event="kira_smoke.input_preprocessor_stage_additional_mlp_output",
+                                payload={
+                                    "additional_embedding_features": additional_features,
+                                    "additional_embeddings_input": _tensor_summary(
+                                        additional_embeddings,
+                                        include_l2=True,
+                                    ),
+                                    "additional_mlp_output": _tensor_summary(
+                                        stage_tensors["additional_mlp_output"],
+                                        include_l2=True,
+                                    ),
+                                    "seq_embeddings_after_additional": _tensor_summary(
+                                        seq_after_additional,
+                                        include_l2=True,
+                                    ),
+                                },
+                            )
+
+                    if "action_mlp_output" in stage_tensors:
+                        if "additional_mlp_output" in stage_tensors and "content_mlp_output" in stage_tensors:
+                            seq_before_action = (
+                                stage_tensors["content_mlp_output"]
+                                + stage_tensors["additional_mlp_output"]
+                            )
+                        else:
+                            seq_before_action = stage_tensors.get(
+                                "content_mlp_output",
+                                stage_tensors["action_mlp_output"],
+                            )
+                        seq_after_action = seq_before_action + stage_tensors["action_mlp_output"]
+                        _emit_debug_event(
+                            event="kira_smoke.input_preprocessor_stage_action_mlp_output",
+                            payload={
+                                "action_embeddings": (
+                                    _tensor_summary(
+                                        stage_tensors["action_embeddings"],
+                                        include_l2=True,
+                                    )
+                                    if "action_embeddings" in stage_tensors
+                                    else None
+                                ),
+                                "action_mlp_output": _tensor_summary(
+                                    stage_tensors["action_mlp_output"],
+                                    include_l2=True,
+                                ),
+                                "seq_embeddings_after_action": _tensor_summary(
+                                    seq_after_action,
+                                    include_l2=True,
+                                ),
+                            },
+                        )
+
+                    if (
+                        isinstance(seq_lengths, torch.Tensor)
+                        and isinstance(seq_payloads, dict)
+                        and isinstance(seq_embeddings_in, torch.Tensor)
+                        and int(getattr(input_preprocessor, "_max_contextual_seq_len", 0)) > 0
+                    ):
+                        contextual_input_embeddings = (
+                            kira_preprocessors_module.get_contextual_input_embeddings(
+                                seq_lengths=seq_lengths,
+                                seq_payloads=seq_payloads,
+                                contextual_feature_to_max_length=getattr(
+                                    input_preprocessor,
+                                    "_contextual_feature_to_max_length",
+                                ),
+                                contextual_feature_to_min_uih_length=getattr(
+                                    input_preprocessor,
+                                    "_contextual_feature_to_min_uih_length",
+                                ),
+                                dtype=seq_embeddings_in.dtype,
+                            )
+                        )
+                        contextual_embeddings = torch.baddbmm(
+                            input_preprocessor._batched_contextual_linear_bias.view(  # pyre-ignore[16]
+                                -1,
+                                1,
+                                input_preprocessor._output_embedding_dim,  # pyre-ignore[16]
+                            ).to(contextual_input_embeddings.dtype),
+                            contextual_input_embeddings.view(
+                                -1,
+                                input_preprocessor._max_contextual_seq_len,  # pyre-ignore[16]
+                                input_preprocessor._input_embedding_dim,  # pyre-ignore[16]
+                            ).transpose(0, 1),
+                            input_preprocessor._batched_contextual_linear_weights.to(  # pyre-ignore[16]
+                                contextual_input_embeddings.dtype
+                            ),
+                        ).transpose(0, 1)
+                        _emit_debug_event(
+                            event="kira_smoke.input_preprocessor_stage_contextual_linear_output",
+                            payload={
+                                "contextual_input_embeddings": _tensor_summary(
+                                    contextual_input_embeddings,
+                                    include_l2=True,
+                                ),
+                                "contextual_embeddings": _tensor_summary(
+                                    contextual_embeddings,
+                                    include_l2=True,
+                                ),
+                            },
+                        )
+                        _emit_debug_event(
+                            event="kira_smoke.input_preprocessor_stage_contextual_concat_output",
+                            payload={
+                                "seq_embeddings_after_contextual_concat": _tensor_summary(
+                                    out_seq_embeddings,
+                                    include_l2=True,
+                                ),
+                                "seq_timestamps_after_contextual_concat": _tensor_summary(
+                                    out_seq_timestamps,
+                                ),
+                            },
+                        )
+
                     _emit_debug_event(
                         event="kira_smoke.user_transducer_after_input_preprocessor",
                         payload={
@@ -603,6 +811,87 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
 
             wrapped_transducer_postprocess._kira_user_debug_wrapped = True  # type: ignore[attr-defined]
             hstu_transducer._postprocess = wrapped_transducer_postprocess
+
+        stu_module = getattr(hstu_transducer, "_stu_module", None)
+        stu_layers = getattr(stu_module, "_stu_layers", None)
+        if isinstance(stu_layers, torch.nn.ModuleList):
+            for layer_idx, layer in enumerate(stu_layers):
+                original_layer_forward = layer.forward
+                if getattr(original_layer_forward, "_kira_user_debug_wrapped", False):
+                    continue
+
+                def _make_wrapped_layer_forward(
+                    index: int,
+                    original_forward: Any,
+                ):
+                    def wrapped_layer_forward(*args: Any, **kwargs: Any):
+                        x = kwargs.get("x", args[0] if len(args) > 0 else None)
+                        x_lengths = kwargs.get(
+                            "x_lengths",
+                            args[1] if len(args) > 1 else None,
+                        )
+                        x_offsets = kwargs.get(
+                            "x_offsets",
+                            args[2] if len(args) > 2 else None,
+                        )
+                        num_targets = kwargs.get(
+                            "num_targets",
+                            args[4] if len(args) > 4 else None,
+                        )
+                        max_seq_len = kwargs.get(
+                            "max_seq_len",
+                            args[3] if len(args) > 3 else None,
+                        )
+                        _emit_debug_event(
+                            event="kira_smoke.user_transducer_stu_layer_input",
+                            payload={
+                                "layer_index": int(index),
+                                "max_seq_len": (
+                                    int(max_seq_len)
+                                    if isinstance(max_seq_len, int)
+                                    else None
+                                ),
+                                "x": (
+                                    _tensor_summary(x, include_l2=True)
+                                    if isinstance(x, torch.Tensor)
+                                    else None
+                                ),
+                                "x_lengths": (
+                                    _tensor_summary(x_lengths)
+                                    if isinstance(x_lengths, torch.Tensor)
+                                    else None
+                                ),
+                                "x_offsets": (
+                                    _tensor_summary(x_offsets)
+                                    if isinstance(x_offsets, torch.Tensor)
+                                    else None
+                                ),
+                                "num_targets": (
+                                    _tensor_summary(num_targets)
+                                    if isinstance(num_targets, torch.Tensor)
+                                    else None
+                                ),
+                            },
+                        )
+
+                        out = original_forward(*args, **kwargs)
+
+                        _emit_debug_event(
+                            event="kira_smoke.user_transducer_stu_layer_output",
+                            payload={
+                                "layer_index": int(index),
+                                "x": _tensor_summary(out, include_l2=True),
+                            },
+                        )
+                        return out
+
+                    wrapped_layer_forward._kira_user_debug_wrapped = True  # type: ignore[attr-defined]
+                    return wrapped_layer_forward
+
+                layer.forward = _make_wrapped_layer_forward(  # pyre-ignore[8]
+                    index=layer_idx,
+                    original_forward=original_layer_forward,
+                )
 
     original_item_forward = dense_model._item_forward  # pyre-ignore[16]
     if getattr(original_item_forward, "_kira_dense_debug_wrapped", False):
