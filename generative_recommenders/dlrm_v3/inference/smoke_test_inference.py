@@ -492,6 +492,24 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
     wrapped_item_forward._kira_dense_debug_wrapped = True  # type: ignore[attr-defined]
     dense_model._item_forward = wrapped_item_forward  # pyre-ignore[16]
 
+    original_user_forward = dense_model._user_forward  # pyre-ignore[16]
+
+    def wrapped_user_forward(*args: Any, **kwargs: Any):
+        user_embeddings = original_user_forward(*args, **kwargs)
+        _emit_debug_event(
+            event="kira_smoke.user_forward_output",
+            payload={
+                "candidates_user_embeddings": _tensor_summary(
+                    user_embeddings,
+                    include_l2=True,
+                ),
+            },
+        )
+        return user_embeddings
+
+    wrapped_user_forward._kira_dense_debug_wrapped = True  # type: ignore[attr-defined]
+    dense_model._user_forward = wrapped_user_forward  # pyre-ignore[16]
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
