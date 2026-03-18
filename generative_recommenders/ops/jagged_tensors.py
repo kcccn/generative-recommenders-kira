@@ -258,7 +258,7 @@ def concat_2D_jagged_multirow(
     offsets_right: Optional[torch.Tensor],
     max_len_left: int,
     max_len_right: int,
-    kernel: HammerKernel = HammerKernel.TRITON,
+    kernel: HammerKernel = HammerKernel.PYTORCH,
 ) -> torch.Tensor:
     if not is_fx_tracing():
         torch._assert(values_left.dim() == 2, "values_left must be 2D")
@@ -305,7 +305,7 @@ def split_2D_jagged_multirow(
     max_len_right: Optional[int] = None,
     offsets_left: Optional[torch.Tensor] = None,
     offsets_right: Optional[torch.Tensor] = None,
-    kernel: HammerKernel = HammerKernel.TRITON,
+    kernel: HammerKernel = HammerKernel.PYTORCH,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if not is_fx_tracing():
         torch._assert(values.dim() == 2, "values must be 2D")

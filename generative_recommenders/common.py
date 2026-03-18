@@ -141,10 +141,7 @@ class HammerModule(torch.nn.Module, abc.ABC):
         kernel = self._hammer_kernel
         if kernel is not None:
             return kernel
-        if self._is_inference and self._use_triton_cc:
-            return HammerKernel.TRITON_CC
-        else:
-            return HammerKernel.TRITON
+        return HammerKernel.PYTORCH
 
     # pyre-ignore[2]
     def recursive_setattr(self, name: str, value: Any) -> None:
