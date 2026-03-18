@@ -670,8 +670,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--top-k",
         type=int,
-        default=5,
-        help="Number of top candidates to print (default: 5).",
+        default=20,
+        help="Number of top candidates to print (default: 20).",
     )
     parser.add_argument(
         "--seed",
@@ -1081,7 +1081,11 @@ def main() -> None:
     set_is_inference(is_inference=True)
 
     hstu_config = get_hstu_configs("movielens-1m")
-    hstu_config.max_num_candidates = max(hstu_config.max_num_candidates_inference, 20)
+    hstu_config.max_num_candidates = max(
+        hstu_config.max_num_candidates,
+        hstu_config.max_num_candidates_inference,
+        20,
+    )
     table_config = get_embedding_table_config("movielens-1m")
 
     config_json_path = _resolve_config_json_path(
