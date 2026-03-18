@@ -874,6 +874,111 @@ def _build_hardcoded_prompt() -> Tuple[List[Dict[str, int]], List[Dict[str, int]
             "item_movie_rating": 0,
             "item_action_weights": 0,
         },
+        {
+            "item_movie_id": 1,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 260,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 1196,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 1210,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 2028,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 2762,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 2997,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 1097,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 3578,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 480,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 589,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 47,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 50,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 527,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
+        {
+            "item_movie_id": 608,
+            "item_query_time": 978310000,
+            "item_dummy_watchtime": 0,
+            "item_movie_rating": 0,
+            "item_action_weights": 0,
+        },
     ]
 
     context = {
@@ -976,7 +1081,7 @@ def main() -> None:
     set_is_inference(is_inference=True)
 
     hstu_config = get_hstu_configs("movielens-1m")
-    hstu_config.max_num_candidates = hstu_config.max_num_candidates_inference
+    hstu_config.max_num_candidates = max(hstu_config.max_num_candidates_inference, 20)
     table_config = get_embedding_table_config("movielens-1m")
 
     config_json_path = _resolve_config_json_path(
