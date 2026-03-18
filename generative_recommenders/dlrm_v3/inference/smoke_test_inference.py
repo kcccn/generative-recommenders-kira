@@ -582,6 +582,15 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
                         contextual_feature_order = list(
                             contextual_feature_to_max_length.keys()
                         )
+                        helper_contextual_input_embeddings = (
+                            kira_preprocessors_module.get_contextual_input_embeddings(
+                                seq_lengths=seq_lengths,
+                                seq_payloads=seq_payloads,
+                                contextual_feature_to_max_length=contextual_feature_to_max_length,
+                                contextual_feature_to_min_uih_length=contextual_feature_to_min_uih_length,
+                                dtype=seq_embeddings_in.dtype,
+                            )
+                        )
                         contextual_inputs_by_feature: Dict[str, Dict[str, Any]] = {}
                         contextual_padded_values: List[torch.Tensor] = []
                         for key, max_len in contextual_feature_to_max_length.items():
@@ -616,10 +625,15 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
                                     include_l2=True,
                                 ),
                             }
-                        contextual_input_embeddings = torch.cat(
+                        manual_contextual_input_embeddings = torch.cat(
                             contextual_padded_values,
                             dim=1,
                         )
+                        abs_diff = (
+                            manual_contextual_input_embeddings.detach().float().cpu()
+                            - helper_contextual_input_embeddings.detach().float().cpu()
+                        ).abs()
+                        contextual_input_embeddings = helper_contextual_input_embeddings
                         _emit_debug_event(
                             event="kira_smoke.input_preprocessor_stage_contextual_input_components",
                             payload={
@@ -629,6 +643,21 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
                                     contextual_input_embeddings,
                                     include_l2=True,
                                 ),
+                            },
+                        )
+                        _emit_debug_event(
+                            event="kira_smoke.input_preprocessor_stage_contextual_input_equivalence",
+                            payload={
+                                "manual_contextual_input_embeddings": _tensor_summary(
+                                    manual_contextual_input_embeddings,
+                                    include_l2=True,
+                                ),
+                                "helper_contextual_input_embeddings": _tensor_summary(
+                                    helper_contextual_input_embeddings,
+                                    include_l2=True,
+                                ),
+                                "manual_vs_helper_max_abs_diff": float(abs_diff.max().item()),
+                                "manual_vs_helper_mean_abs_diff": float(abs_diff.mean().item()),
                             },
                         )
                         if not getattr(
