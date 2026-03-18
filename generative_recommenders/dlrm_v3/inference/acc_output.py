@@ -168,11 +168,60 @@ def _truncate_table_config_num_embeddings(
         emb_cfg.num_embeddings = min(int(emb_cfg.num_embeddings), max_num_embeddings)
 
 
+def _build_feature_caps(table_config: dict[str, Any]) -> dict[str, int]:
+    feature_caps: dict[str, int] = {}
+    for emb_cfg in table_config.values():
+        cap = int(emb_cfg.num_embeddings)
+        for feature_name in emb_cfg.feature_names:
+            key = str(feature_name)
+            if key in feature_caps:
+                feature_caps[key] = min(feature_caps[key], cap)
+            else:
+                feature_caps[key] = cap
+    return feature_caps
+
+
+def _validate_feature_value(
+    *,
+    case_id: str,
+    key: str,
+    value: Any,
+    feature_caps: dict[str, int],
+) -> int:
+    ivalue = int(value)
+    cap = feature_caps.get(key)
+    if cap is not None:
+        if ivalue < 0 or ivalue >= cap:
+            raise ValueError(
+                "feature index out of range: "
+                f"case_id={case_id}, feature={key}, value={ivalue}, "
+                f"valid=[0,{cap - 1}]"
+            )
+    return ivalue
+
+
+def _feature_value(
+    *,
+    case_id: str,
+    key: str,
+    value: Any,
+    feature_caps: dict[str, int],
+) -> int:
+    return _validate_feature_value(
+        case_id=case_id,
+        key=key,
+        value=value,
+        feature_caps=feature_caps,
+    )
+
+
 def _build_native_samples(
+    case_id: str,
     hstu_config: Any,
     user_history: list[dict[str, int]],
     candidates: list[dict[str, int]],
     context: dict[str, int],
+    feature_caps: dict[str, int],
 ) -> Any:
     from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
@@ -188,10 +237,25 @@ def _build_native_samples(
     uih_lengths: list[int] = []
     for key in uih_keys:
         if key in contextual_keys:
-            uih_values.append(int(context.get(key, 0)))
+            uih_values.append(
+                _feature_value(
+                    case_id=case_id,
+                    key=key,
+                    value=context.get(key, 0),
+                    feature_caps=feature_caps,
+                )
+            )
             uih_lengths.append(1)
         else:
-            values = [int(row.get(key, 0)) for row in user_history]
+            values = [
+                _feature_value(
+                    case_id=case_id,
+                    key=key,
+                    value=row.get(key, 0),
+                    feature_caps=feature_caps,
+                )
+                for row in user_history
+            ]
             uih_values.extend(values)
             uih_lengths.append(seq_len)
 
@@ -199,7 +263,15 @@ def _build_native_samples(
     cand_values: list[int] = []
     cand_lengths: list[int] = []
     for key in cand_keys:
-        values = [int(row.get(key, 0)) for row in candidates]
+        values = [
+            _feature_value(
+                case_id=case_id,
+                key=key,
+                value=row.get(key, 0),
+                feature_caps=feature_caps,
+            )
+            for row in candidates
+        ]
         cand_values.extend(values)
         cand_lengths.append(num_candidates)
 
@@ -277,6 +349,7 @@ def main() -> int:
         table_config=table_config,
         max_num_embeddings=args.max_num_embeddings,
     )
+    feature_caps = _build_feature_caps(table_config)
 
     model_family = HSTUModelFamily(
         hstu_config=hstu_config,
@@ -292,10 +365,12 @@ def main() -> int:
     for idx, case in enumerate(input_cases, start=1):
         candidates = case["candidates"]
         samples = _build_native_samples(
+            case_id=str(case["case_id"]),
             hstu_config=hstu_config,
             user_history=case["user_history"],
             candidates=candidates,
             context=case["context"],
+            feature_caps=feature_caps,
         )
         pred_output = model_family.predict(samples)
         if pred_output is None:
