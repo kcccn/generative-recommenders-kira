@@ -416,7 +416,64 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
                         "seq_timestamps",
                         args[1] if len(args) > 1 else None,
                     )
+
+                    concat_out = None
+                    linear_out = None
+                    layer_norm_out = None
+                    if (
+                        isinstance(candidate_embeddings_in, torch.Tensor)
+                        and isinstance(candidate_timestamps, torch.Tensor)
+                        and hasattr(output_postprocessor, "_concat_time_features")
+                        and hasattr(output_postprocessor, "_time_feature_combiner")
+                        and hasattr(output_postprocessor, "_layer_norm")
+                    ):
+                        concat_out = output_postprocessor._concat_time_features(  # pyre-ignore[16]
+                            candidate_embeddings_in,
+                            timestamps=candidate_timestamps,
+                        )
+                        linear_out = output_postprocessor._time_feature_combiner(  # pyre-ignore[16]
+                            concat_out.to(output_postprocessor._time_feature_combiner.weight.dtype)  # pyre-ignore[16]
+                        )
+                        layer_norm_out = output_postprocessor._layer_norm(linear_out)  # pyre-ignore[16]
+
                     out = original_output_postprocessor_forward(*args, **kwargs)
+
+                    if not getattr(output_postprocessor, "_kira_postprocessor_weights_logged", False):
+                        if (
+                            hasattr(output_postprocessor, "_time_feature_combiner")
+                            and hasattr(output_postprocessor, "_layer_norm")
+                            and hasattr(output_postprocessor, "_period_units")
+                            and hasattr(output_postprocessor, "_units_per_period")
+                        ):
+                            _emit_debug_event(
+                                event="kira_smoke.user_transducer_output_postprocessor_weights_once",
+                                payload={
+                                    "time_feature_combiner_weight": _tensor_summary(
+                                        output_postprocessor._time_feature_combiner.weight,  # pyre-ignore[16]
+                                        include_l2=True,
+                                    ),
+                                    "time_feature_combiner_bias": _tensor_summary(
+                                        output_postprocessor._time_feature_combiner.bias,  # pyre-ignore[16]
+                                        include_l2=True,
+                                    ),
+                                    "layer_norm_weight": _tensor_summary(
+                                        output_postprocessor._layer_norm.weight,  # pyre-ignore[16]
+                                        include_l2=True,
+                                    ),
+                                    "layer_norm_bias": _tensor_summary(
+                                        output_postprocessor._layer_norm.bias,  # pyre-ignore[16]
+                                        include_l2=True,
+                                    ),
+                                    "period_units": _tensor_summary(
+                                        output_postprocessor._period_units,  # pyre-ignore[16]
+                                    ),
+                                    "units_per_period": _tensor_summary(
+                                        output_postprocessor._units_per_period,  # pyre-ignore[16]
+                                    ),
+                                },
+                            )
+                        output_postprocessor._kira_postprocessor_weights_logged = True  # pyre-ignore[16]
+
                     _emit_debug_event(
                         event="kira_smoke.user_transducer_output_postprocessor_io",
                         payload={
@@ -436,6 +493,35 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
                             ),
                         },
                     )
+                    if concat_out is not None and linear_out is not None:
+                        _emit_debug_event(
+                            event="kira_smoke.user_transducer_output_postprocessor_stages",
+                            payload={
+                                "seq_embeddings_input": _tensor_summary(
+                                    candidate_embeddings_in,
+                                    include_l2=True,
+                                ),
+                                "seq_timestamps_input": _tensor_summary(
+                                    candidate_timestamps,
+                                ),
+                                "concat_time_features_output": _tensor_summary(
+                                    concat_out,
+                                    include_l2=True,
+                                ),
+                                "linear_output": _tensor_summary(
+                                    linear_out,
+                                    include_l2=True,
+                                ),
+                                "layer_norm_output_manual": _tensor_summary(
+                                    layer_norm_out,
+                                    include_l2=True,
+                                ),
+                                "layer_norm_output_forward": _tensor_summary(
+                                    out,
+                                    include_l2=True,
+                                ),
+                            },
+                        )
                     return out
 
                 wrapped_output_postprocessor_forward._kira_user_debug_wrapped = True  # type: ignore[attr-defined]
