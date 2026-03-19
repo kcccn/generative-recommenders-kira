@@ -399,6 +399,48 @@ def _install_dense_hooks(model_family: HSTUModelFamily) -> None:
 
     hstu_transducer = getattr(dense_model, "_hstu_transducer", None)  # pyre-ignore[16]
     if hstu_transducer is not None:
+        output_postprocessor = getattr(hstu_transducer, "_output_postprocessor", None)
+        if output_postprocessor is not None:
+            original_output_postprocessor_forward = output_postprocessor.forward
+            if not getattr(
+                original_output_postprocessor_forward,
+                "_kira_user_debug_wrapped",
+                False,
+            ):
+                def wrapped_output_postprocessor_forward(*args: Any, **kwargs: Any):
+                    candidate_embeddings_in = kwargs.get(
+                        "seq_embeddings",
+                        args[0] if len(args) > 0 else None,
+                    )
+                    candidate_timestamps = kwargs.get(
+                        "seq_timestamps",
+                        args[1] if len(args) > 1 else None,
+                    )
+                    out = original_output_postprocessor_forward(*args, **kwargs)
+                    _emit_debug_event(
+                        event="kira_smoke.user_transducer_output_postprocessor_io",
+                        payload={
+                            "candidate_embeddings_input": (
+                                _tensor_summary(candidate_embeddings_in, include_l2=True)
+                                if isinstance(candidate_embeddings_in, torch.Tensor)
+                                else None
+                            ),
+                            "candidate_timestamps": (
+                                _tensor_summary(candidate_timestamps)
+                                if isinstance(candidate_timestamps, torch.Tensor)
+                                else None
+                            ),
+                            "candidate_embeddings_output": _tensor_summary(
+                                out,
+                                include_l2=True,
+                            ),
+                        },
+                    )
+                    return out
+
+                wrapped_output_postprocessor_forward._kira_user_debug_wrapped = True  # type: ignore[attr-defined]
+                output_postprocessor.forward = wrapped_output_postprocessor_forward
+
         input_preprocessor = getattr(hstu_transducer, "_input_preprocessor", None)
         if input_preprocessor is not None:
             original_input_preprocessor_forward = input_preprocessor.forward
